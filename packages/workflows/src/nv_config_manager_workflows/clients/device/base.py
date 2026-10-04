@@ -390,7 +390,7 @@ class NetworkConnection:
         """Generate and retrieve a full platform tech-support bundle.
 
         Returns:
-            A tuple of (raw bundle bytes, full cl-support command output text).
+            A tuple of (raw bundle bytes, the collection output or a one-line summary).
         """
         raise NotImplementedError()
 
