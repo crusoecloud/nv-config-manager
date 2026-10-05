@@ -1,0 +1,5 @@
+{#- Local accounts. The hash uses the site's fixed salt, so a re-render changes
+    the line only when the password rotates (password_key = <secret>_<rotation>). -#}
+{% for user in device_data|users %}
+username {{ user.username }} privilege 15 role {{ user.role or "network-admin" }} secret sha512 {{ (user.password_key|load_secret(site=device_data|site_name))|encrypt("sha512", site=device_data|site_name) }}
+{% endfor %}

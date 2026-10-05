@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -220,3 +221,24 @@ def test_cumulus_sftp_startup_download_uses_default_vrf_without_eth0_address(
     else:
         assert "ip vrf exec default" not in boot_script
         assert "touch /tmp/startup.yaml\nchmod 600 /tmp/startup.yaml" in boot_script
+
+
+def test_arista_users_include_renders_one_sha512_secret_per_account(
+    public_leaf_data, public_location_data
+) -> None:
+    """The EOS account lines the password rotation validator expects."""
+    os.environ["NV_CONFIG_MANAGER_SKIP_VAULT"] = "1"
+    render_data = RenderData(device=public_leaf_data, location=public_location_data)
+
+    output = Renderer().render("arista-eos/role-common/include/users.j2", render_data)
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    credentials = sorted(public_leaf_data.access.credentials, key=lambda c: c.username)
+    assert len(lines) == len(credentials) > 0
+    for line, credential in zip(lines, credentials, strict=True):
+        role = (credential.role or "").strip() or "network-admin"
+        assert re.fullmatch(
+            rf"username {re.escape(credential.username)} privilege 15 role {re.escape(role)} "
+            r"secret sha512 \$6\$H0QFj2rx\$[./A-Za-z0-9]+",
+            line,
+        ), line

@@ -61,6 +61,52 @@ _ENGINEERING_BUILD = re.compile(r"-\d+\.\w+\s+\(engineering build\)$")
 _TECH_SUPPORT_TIMEOUT_SECONDS = 540
 
 
+class _PasswordFallbackNode(Node):
+    """A pyeapi node that retries a rejected request with the other known passwords.
+
+    pyeapi sends nothing when it connects, so a stale password only shows up as
+    a 401 on the first command. Each request that eAPI rejects as unauthorized is
+    retried with the remaining candidate passwords, newest first; the one that
+    works becomes the node's password for the rest of the session.
+    """
+
+    def __init__(
+        self,
+        connection: object,
+        *,
+        username: str,
+        passwords: Callable[[], list[str]],
+        on_password: Callable[[str], None],
+        **kwargs: object,
+    ) -> None:
+        super().__init__(connection, **kwargs)
+        self._fallback_username = username
+        self._candidate_passwords = passwords
+        self._on_password = on_password
+
+    def run_commands(self, commands: object, *args: object, **kwargs: object) -> object:
+        try:
+            return super().run_commands(commands, *args, **kwargs)
+        except pyeapi.eapilib.ConnectionError as exc:
+            if "unauthorized" not in str(exc).lower():
+                raise
+            unauthorized = exc
+        for password in self._candidate_passwords():
+            self.connection.authentication(self._fallback_username, password)
+            self.enable_authentication(password)
+            try:
+                result = super().run_commands(commands, *args, **kwargs)
+            except pyeapi.eapilib.ConnectionError as exc:
+                if "unauthorized" not in str(exc).lower():
+                    raise
+                continue
+            self._on_password(password)
+            return result
+        raise NetworkDeviceException(
+            f"eAPI rejected every known password for {self._fallback_username}"
+        ) from unauthorized
+
+
 class AristaConnection(NetworkConnection):
     """Arista Device Connection."""
 
@@ -87,22 +133,37 @@ class AristaConnection(NetworkConnection):
         ctx.set_ciphers("DEFAULT")
 
         def connect_with_password(password: str) -> Node:
-            return pyeapi.connect(
+            connection = pyeapi.connect(
                 transport="https",
                 host=self._host,
                 port=self._port,
                 username=self._username,
                 password=password,
-                enablepwd=password,
-                return_node=True,
                 context=ctx,
                 timeout=300,
             )
+            self._working_password = password
+            return _PasswordFallbackNode(
+                connection,
+                username=self._username,
+                passwords=self._other_passwords,
+                on_password=self._remember_password,
+                enablepwd=password,
+            )
 
+        # Connecting sends nothing, so this only picks the first candidate; the
+        # node falls back to the others on the first unauthorized request.
         return self._try_passwords_with_callback(
             connect_with_password,
             (pyeapi.eapilib.ConnectionError, pyeapi.eapilib.CommandError),
         )
+
+    def _other_passwords(self) -> list[str]:
+        """Candidate passwords other than the one in use, newest first."""
+        return [p for p in self._passwords_to_try if p != self._working_password]
+
+    def _remember_password(self, password: str) -> None:
+        self._working_password = password
 
     def get_running_configuration(self) -> str:
         """Load the running configuration for a given device."""

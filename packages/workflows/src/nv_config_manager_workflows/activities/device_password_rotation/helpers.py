@@ -26,6 +26,9 @@ _JUNOS_EDIT_HEADER_RE = re.compile(r"^\[edit\s+(.+)\]$")
 _JUNOS_PASSWORD_LINE_RE = re.compile(
     r'^[+-]\s*encrypted-password\s+"\$[0-9]\$\S+";(\s*##\s*SECRET-DATA)?$'
 )
+# EOS session diffs are unified diffs: "---"/"+++" headers, "@@" hunks, context lines
+# with a leading space, and changed lines whose sign is followed directly by the text.
+_EOS_DIFF_NOISE_RE = re.compile(r"^(---|\+\+\+|@@)")
 
 
 def _validate_cumulus_diff(diff: str, username: str) -> ValidatePasswordDiffOutput:
@@ -109,4 +112,66 @@ def _validate_junos_diff(diff: str, username: str) -> ValidatePasswordDiffOutput
         invalid_lines=invalid_lines,
         valid_lines=valid_lines,
         error_message=error_msg,
+    )
+
+
+def _eos_password_line_re(username: str) -> re.Pattern[str]:
+    """Match the EOS line that sets a user's password, with the hash captured."""
+    if username == "root":
+        # The root account is configured outside "username".
+        return re.compile(r"^(?P<sign>[+-])(?P<prefix>aaa root secret sha512 )(?P<hash>\$6\$\S+)$")
+    return re.compile(
+        r"^(?P<sign>[+-])(?P<prefix>username "
+        + re.escape(username)
+        + r"(?: [^$]*?)? secret sha512 )(?P<hash>\$6\$\S+)$"
+    )
+
+
+def _validate_eos_diff(diff: str, username: str) -> ValidatePasswordDiffOutput:
+    """Validate an EOS session diff touches only the target user's sha512 secret.
+
+    The removed and added lines for the user must be identical apart from the
+    hash, so a change of role or privilege cannot ride along with the rotation.
+    """
+    line_re = _eos_password_line_re(username)
+    valid_lines: list[str] = []
+    invalid_lines: list[str] = []
+    prefixes: dict[str, set[str]] = {"-": set(), "+": set()}
+
+    for raw_line in diff.split("\n"):
+        line = raw_line.rstrip()
+        if not line.strip() or _EOS_DIFF_NOISE_RE.match(line) or line[0] == " ":
+            continue  # headers, hunk markers and unchanged context
+        match = line_re.match(line)
+        if match:
+            valid_lines.append(line)
+            prefixes[match["sign"]].add(match["prefix"])
+        else:
+            invalid_lines.append(line)
+            activity.logger.warning("Unexpected line in EOS password diff")
+
+    if invalid_lines:
+        error_msg = f"Diff contains non-password changes for user '{username}'"
+        return ValidatePasswordDiffOutput(
+            is_valid=False,
+            invalid_lines=invalid_lines,
+            valid_lines=valid_lines,
+            error_message=error_msg,
+        )
+    if not valid_lines or not prefixes["+"]:
+        error_msg = f"Diff contains no password changes for user '{username}'"
+        return ValidatePasswordDiffOutput(
+            is_valid=False, invalid_lines=[], valid_lines=valid_lines, error_message=error_msg
+        )
+    if prefixes["-"] and prefixes["-"] != prefixes["+"]:
+        error_msg = f"Diff changes more than the password of user '{username}'"
+        return ValidatePasswordDiffOutput(
+            is_valid=False,
+            invalid_lines=valid_lines,
+            valid_lines=[],
+            error_message=error_msg,
+        )
+    activity.logger.info(f"EOS password diff validation successful for user {username}")
+    return ValidatePasswordDiffOutput(
+        is_valid=True, invalid_lines=[], valid_lines=valid_lines, error_message=None
     )
