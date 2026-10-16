@@ -25,8 +25,8 @@ serialized-argument coverage for UFM port retrieval and IB GUID discovery.
 
 ## Configuration-lifecycle fixtures
 
-The six deployment histories were captured from successful local Temporal
-workflow executions after the configuration-lifecycle activity boundary was
+The deployment histories were captured from local Temporal workflow
+executions after the configuration-lifecycle activity boundary was
 established. They are fixed compatibility fixtures and must not be regenerated
 solely because a Python module path changes.
 
