@@ -350,14 +350,14 @@ class AristaConnection(NetworkConnection):
             (gzipped tarball bytes, one-line summary of the collection)
         """
         start = time.monotonic()
+        transport = self._node.connection.transport
+        default_timeout = transport.timeout
         stop_hb, hb = self._start_heartbeat_thread(heartbeat_fn)
         if heartbeat_fn:
             try:
                 heartbeat_fn()
             except Exception:
                 pass
-        transport = self._node.connection.transport
-        default_timeout = transport.timeout
         transport.timeout = _TECH_SUPPORT_TIMEOUT_SECONDS
         try:
             response = self._node.enable("show tech-support", encoding="text")
