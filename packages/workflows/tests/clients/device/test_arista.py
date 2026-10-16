@@ -326,6 +326,16 @@ def test_get_tech_support_bundle_wraps_eapi_errors(failure: Exception) -> None:
         conn.get_tech_support_bundle()
 
 
+def test_get_tech_support_bundle_rejects_a_response_without_output() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node({"messages": []})
+
+    with pytest.raises(
+        NetworkDeviceException, match="show tech-support returned no output on 192.0.2.1"
+    ):
+        conn.get_tech_support_bundle()
+
+
 def test_diag_platform_environment_reports_each_missing_sensor_group() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(

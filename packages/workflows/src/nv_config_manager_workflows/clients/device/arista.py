@@ -361,7 +361,12 @@ class AristaConnection(NetworkConnection):
             stop_hb.set()
             hb.join(timeout=2)
 
-        report = cast(str, response[0]["result"]["output"]).encode()
+        try:
+            report = cast(str, response[0]["result"]["output"]).encode()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise NetworkDeviceException(
+                f"show tech-support returned no output on {self._host}"
+            ) from exc
         member = tarfile.TarInfo("show-tech-support.txt")
         member.size = len(report)
         member.mtime = int(time.time())
