@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, call
 import pyeapi.eapilib
 import pytest
 
+from nv_config_manager_workflows.clients.device import arista
 from nv_config_manager_workflows.clients.device.arista import AristaConnection
 from nv_config_manager_workflows.clients.device.base import COMMIT_CONFIRM_ROLLBACK_SECONDS
 from nv_config_manager_workflows.clients.device.exceptions import (
@@ -323,6 +324,34 @@ def test_get_tech_support_bundle_wraps_eapi_errors(failure: Exception) -> None:
     conn._node = _eapi_node(failure)
 
     with pytest.raises(NetworkDeviceException, match="show tech-support failed on 192.0.2.1"):
+        conn.get_tech_support_bundle()
+
+
+def test_get_tech_support_bundle_extends_the_eapi_timeout_for_the_report() -> None:
+    conn = _arista_connection()
+    conn._node = MagicMock()
+    conn._node.connection.transport.timeout = 300
+    timeouts_seen = []
+
+    def enable(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        timeouts_seen.append(conn._node.connection.transport.timeout)
+        return [{"result": {"output": "report\n"}}]
+
+    conn._node.enable.side_effect = enable
+
+    conn.get_tech_support_bundle()
+
+    assert timeouts_seen == [arista._TECH_SUPPORT_TIMEOUT_SECONDS]
+    assert conn._node.connection.transport.timeout == 300
+
+
+def test_get_tech_support_bundle_reports_a_timeout() -> None:
+    conn = _arista_connection()
+    timed_out = pyeapi.eapilib.ConnectionError("https", "Socket error during eAPI connection")
+    timed_out.__context__ = TimeoutError("timed out")
+    conn._node = _eapi_node(timed_out)
+
+    with pytest.raises(NetworkDeviceException, match="show tech-support timed out on 192.0.2.1"):
         conn.get_tech_support_bundle()
 
 

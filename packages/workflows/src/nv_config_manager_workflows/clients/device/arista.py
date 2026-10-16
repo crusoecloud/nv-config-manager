@@ -57,6 +57,9 @@ logger = get_logger(__name__, category=LogCategory.TEMPORAL_ACTIVITY)
 # "4.34.3M-44102239.4343M (engineering build)" is release 4.34.3M.
 _ENGINEERING_BUILD = re.compile(r"-\d+\.\w+\s+\(engineering build\)$")
 
+# Below the 600 s tech-support activity timeout.
+_TECH_SUPPORT_TIMEOUT_SECONDS = 540
+
 
 class AristaConnection(NetworkConnection):
     """Arista Device Connection."""
@@ -353,11 +356,23 @@ class AristaConnection(NetworkConnection):
                 heartbeat_fn()
             except Exception:
                 pass
+        transport = self._node.connection.transport
+        default_timeout = transport.timeout
+        transport.timeout = _TECH_SUPPORT_TIMEOUT_SECONDS
         try:
             response = self._node.enable("show tech-support", encoding="text")
-        except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError) as exc:
+        except pyeapi.eapilib.ConnectionError as exc:
+            if isinstance(exc.__context__, TimeoutError):
+                elapsed = time.monotonic() - start
+                logger.warning("show tech-support on %s timed out after %.0fs", self._host, elapsed)
+                raise NetworkDeviceException(
+                    f"show tech-support timed out on {self._host} after {elapsed:.0f}s"
+                ) from exc
+            raise NetworkDeviceException(f"show tech-support failed on {self._host}") from exc
+        except pyeapi.eapilib.CommandError as exc:
             raise NetworkDeviceException(f"show tech-support failed on {self._host}") from exc
         finally:
+            transport.timeout = default_timeout
             stop_hb.set()
             hb.join(timeout=2)
 
