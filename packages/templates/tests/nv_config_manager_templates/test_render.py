@@ -248,3 +248,28 @@ def test_arista_boot_script_provisions_from_the_ztp_service(
     assert "boot system flash:" in output
     assert "mv /mnt/flash/startup-config.ztp /mnt/flash/startup-config" in output
     assert output.rstrip().endswith("exit 0")
+
+
+def test_arista_boot_script_reports_provisioned_after_the_reload(
+    public_leaf_data, public_location_data
+) -> None:
+    """The provisioned report waits for the reload: a one-shot rc.eos sends it once eAPI is up."""
+    os.environ["NV_CONFIG_MANAGER_SKIP_VAULT"] = "1"
+    render_data = RenderData(device=public_leaf_data, location=public_location_data)
+
+    output = Renderer().render("arista-eos/role-common/base/boot-script.j2", render_data)
+
+    main, _, rest = output.partition("cat > /mnt/flash/rc.eos.ztp <<EOF")
+    hook, _, tail = rest.partition("\nEOF\nchmod +x /mnt/flash/rc.eos.ztp")
+    assert hook, "the boot script writes no rc.eos"
+    assert "/provisioned" not in main + tail, "the script reports provisioned before EOS reloads"
+    assert '"$DEVICE_URL/provisioned"' in hook
+    assert 'DEVICE_URL="$DEVICE_URL"' in hook
+    assert "rm -f /mnt/flash/rc.eos" in hook
+    assert "show management api http-commands | json" in hook
+    # After the reload the management port is in a VRF; the report must leave from it.
+    assert 'netns=(ip netns exec "ns-$vrf")' in hook
+    assert '"${netns[@]}" curl' in hook
+    assert ") < /dev/null > /dev/null 2>&1 &" in hook
+    # rc.eos is put in place last, so a script that fails earlier leaves no report behind.
+    assert tail.lstrip("\n").startswith("mv /mnt/flash/rc.eos.ztp /mnt/flash/rc.eos")

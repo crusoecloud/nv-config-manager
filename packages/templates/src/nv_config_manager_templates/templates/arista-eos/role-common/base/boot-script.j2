@@ -86,8 +86,41 @@ mv /mnt/flash/startup-config.ztp /mnt/flash/startup-config
 
 {% block extras %}{% endblock %}
 
-# Record the device as provisioned in the DCIM; Config Manager backs it up from there.
-retry_curl --fail -X POST "$DEVICE_URL/provisioned"
+{% block report_provisioned %}
+# Config Manager backs a device up as soon as it is marked provisioned, and EOS reloads the
+# moment this script exits, so reporting from here races the reload. Leave the report to a
+# one-shot flash:rc.eos instead: EOS runs it early on the next boot, it deletes itself, and a
+# background job waits until eAPI serves on the management address before reporting. Once the
+# configuration is applied the management port usually sits in a VRF, which EOS runs as the
+# network namespace ns-<VRF>, so the report goes out from the VRF eAPI serves in.
+cat > /mnt/flash/rc.eos.ztp <<EOF
+#!/bin/bash
+DEVICE_URL="$DEVICE_URL"
+EOF
+cat >> /mnt/flash/rc.eos.ztp <<'EOF'
+rm -f /mnt/flash/rc.eos
+(
+  exec >> /mnt/flash/ztp-nvcm.log 2>&1
+  date "+%FT%T rc.eos waiting for eAPI before reporting provisioned"
+  for attempt in $(seq 90); do
+    vrf=$(FastCli -p 15 -c "show management api http-commands | json" 2>/dev/null |
+        python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["httpsServer"]["running"] and d["urls"]; print(d["vrf"])' 2>/dev/null)
+    if [ -n "$vrf" ]; then
+      netns=()
+      [ "$vrf" = default ] || netns=(ip netns exec "ns-$vrf")
+      if "${netns[@]}" curl --silent --show-error --fail --retry 5 --retry-delay 10 --retry-connrefused -X POST "$DEVICE_URL/provisioned"; then
+        date "+%FT%T rc.eos reported provisioned from VRF $vrf"
+        exit 0
+      fi
+    fi
+    sleep 10
+  done
+  date "+%FT%T ERROR: rc.eos gave up reporting provisioned; mark the device provisioned by hand"
+) < /dev/null > /dev/null 2>&1 &
+EOF
+chmod +x /mnt/flash/rc.eos.ztp
+mv /mnt/flash/rc.eos.ztp /mnt/flash/rc.eos
+{% endblock %}
 
-date "+%FT%T ztp script finished; EOS reloads with the new startup-config"
+date "+%FT%T ztp script finished; EOS reloads and rc.eos reports provisioned once eAPI is up"
 exit 0

@@ -49,7 +49,7 @@ option boot-file-name "http://ztp.example.com/v1/device/{device_uuid}/config/ztp
 boot-file-name http://{{ ztp_server }}/v1/device/{{ device_id }}/boot-script
 ```
 
-EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, writes `full-config` as the startup-config, and marks the device provisioned; EOS then reloads with that configuration. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device deletes its startup-config and reloads it, which starts ZeroTouch.
+EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, and writes `full-config` as the startup-config. EOS then reloads with that configuration, and the switch reports itself provisioned once eAPI is up after the reload. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device deletes its startup-config and reloads it, which starts ZeroTouch.
 
 Replace `ztp.example.com` with your ZTP server URL and `{device_uuid}` with the device UUID from the device management system.
 
