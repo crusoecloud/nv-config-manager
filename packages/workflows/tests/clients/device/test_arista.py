@@ -456,3 +456,48 @@ def test_run_diagnostic_command_serializes_new_arista_command() -> None:
     output = conn.run_diagnostic_command("show_platform_transceiver")
 
     assert json.loads(output) == {"error": "Transceiver data not available on this device"}
+
+
+def test_execute_ztp_deletes_the_startup_config_and_reloads() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node({}, pyeapi.eapilib.ConnectionError("192.0.2.1", "connection reset"))
+
+    conn.execute_ztp()
+
+    assert [c.args[0] for c in conn._node.enable.call_args_list] == [
+        "delete flash:startup-config",
+        "reload now",
+    ]
+
+
+def test_execute_ztp_tolerates_a_missing_startup_config() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        pyeapi.eapilib.CommandError(
+            1000,
+            "could not run command",
+            command_error="Error deleting flash:/startup-config (No such file or directory)",
+        ),
+        {},
+    )
+
+    conn.execute_ztp()
+
+    assert conn._node.enable.call_count == 2
+
+
+def test_execute_ztp_reports_a_refused_reload() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node({}, pyeapi.eapilib.CommandError(1002, "Unavailable command"))
+
+    with pytest.raises(NetworkDeviceException, match="refused to reload"):
+        conn.execute_ztp()
+
+
+def test_get_ztp_status_is_success_once_zerotouch_is_disabled() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node({"mode": "disabled", "scriptTimeout": 900})
+    assert conn.get_ztp_status() == "success"
+
+    conn._node = _eapi_node({"mode": "enabled", "scriptTimeout": 900})
+    assert conn.get_ztp_status() == "enabled"

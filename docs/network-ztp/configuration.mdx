@@ -43,6 +43,14 @@ option boot-file-name "http://ztp.example.com/v1/device/{device_uuid}/config/ztp
 
 `full-config` is the intended Junos configuration rendered by operator or plugin templates. The ZTP API does not synthesize a placeholder file.
 
+**Arista EOS** — standard DHCP option 67 (`boot-file-name`) pointing at the rendered boot script. The bundled platform context sets it on `Management1` and `Management0`:
+
+```text
+boot-file-name http://{{ ztp_server }}/v1/device/{{ device_id }}/boot-script
+```
+
+EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, writes `full-config` as the startup-config, and marks the device provisioned; EOS then reloads with that configuration. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device deletes its startup-config and reloads it, which starts ZeroTouch.
+
 Replace `ztp.example.com` with your ZTP server URL and `{device_uuid}` with the device UUID from the device management system.
 
 ### ONIE Configuration
@@ -123,9 +131,9 @@ The HTTP endpoint remains available for compatibility and troubleshooting.
 
 Common configuration file names:
 
-- `boot-script`: Cumulus Linux initial boot script
+- `boot-script`: Cumulus Linux or Arista EOS initial boot script
 - `ztp.json`: NV-OS ZTP sequence
-- `full-config`: Junos hierarchical configuration (operator- or plugin-rendered)
+- `full-config`: Junos hierarchical configuration (operator- or plugin-rendered) or Arista EOS configuration
 - `startup.yaml`: Cumulus / NV-OS intended configuration
 - `system.cfg`: System configuration
 - `interfaces.cfg`: Interface configuration

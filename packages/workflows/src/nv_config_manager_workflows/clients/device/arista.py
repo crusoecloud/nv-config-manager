@@ -549,3 +549,39 @@ class AristaConnection(NetworkConnection):
             for name, data in interfaces.items()
             if "physicalAddress" in data or "burnedInAddress" in data
         }
+
+    # ------------------------------------------------------------------
+    # Zero-touch provisioning. EOS runs ZeroTouch when it boots without a
+    # startup-config: DHCP option 67 names the script it downloads and runs.
+    # ------------------------------------------------------------------
+
+    def execute_ztp(self) -> None:
+        """Factory-reset the switch so it re-runs ZeroTouch on its next boot.
+
+        Deleting the startup-config and reloading is what makes EOS enter
+        ZeroTouch; the running configuration is deliberately not saved. The
+        reload closes the eAPI connection, which is the expected outcome.
+        """
+        try:
+            self._node.enable("delete flash:startup-config")
+        except pyeapi.eapilib.CommandError as exc:
+            if "No such file" not in str(exc.command_error):
+                raise NetworkDeviceException(
+                    f"{self._host} could not delete its startup-config: {exc}"
+                ) from exc
+        try:
+            self._node.enable("reload now")
+        except pyeapi.eapilib.CommandError as exc:
+            raise NetworkDeviceException(f"{self._host} refused to reload: {exc}") from exc
+        except pyeapi.eapilib.ConnectionError:
+            logger.info("eAPI connection to %s closed by the reload", self._host)
+
+    def get_ztp_status(self) -> str:
+        """Report ``success`` once the switch runs its provisioned configuration.
+
+        While ZeroTouch runs there is no eAPI to answer, so the caller sees
+        connection errors. Once eAPI answers, ``show zerotouch`` reports
+        ``disabled`` for a switch booted from a startup-config.
+        """
+        mode = str(self._node.enable("show zerotouch")[0]["result"].get("mode", ""))
+        return "success" if mode == "disabled" else mode or "unknown"

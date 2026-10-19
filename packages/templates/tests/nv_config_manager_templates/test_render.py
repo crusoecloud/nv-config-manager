@@ -27,6 +27,8 @@ from nv_config_manager_dcim import RenderData, RenderDataExtension
 
 from nv_config_manager_templates.dataclasses.interface import ConnectedDevice
 from nv_config_manager_templates.filters import FilterException
+from nv_config_manager_templates.filters.device import uuid as device_uuid
+from nv_config_manager_templates.filters.device import ztp_servers
 from nv_config_manager_templates.render import Renderer
 
 RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"
@@ -220,3 +222,29 @@ def test_cumulus_sftp_startup_download_uses_default_vrf_without_eth0_address(
     else:
         assert "ip vrf exec default" not in boot_script
         assert "touch /tmp/startup.yaml\nchmod 600 /tmp/startup.yaml" in boot_script
+
+
+def test_arista_boot_script_provisions_from_the_ztp_service(
+    public_leaf_data, public_location_data
+) -> None:
+    """The EOS ZeroTouch script fetches everything from the device's own ZTP endpoints."""
+    os.environ["NV_CONFIG_MANAGER_SKIP_VAULT"] = "1"
+    render_data = RenderData(device=public_leaf_data, location=public_location_data)
+
+    output = Renderer().render("arista-eos/role-common/base/boot-script.j2", render_data)
+
+    assert output.startswith("#!/bin/bash\n")
+    assert f'ZTP_SERVER="http://{ztp_servers(public_leaf_data)[0]}"' in output
+    assert f'DEVICE_URL="$ZTP_SERVER/v1/device/{device_uuid(public_leaf_data)}"' in output
+    assert f'DESIRED_FIRMWARE="{public_leaf_data.firmware.desired_version}"' in output
+    for endpoint in (
+        "validate_serial",
+        "firmware",
+        "firmware/checksum",
+        "config/full-config",
+        "provisioned",
+    ):
+        assert f'"$DEVICE_URL/{endpoint}"' in output, endpoint
+    assert "boot system flash:" in output
+    assert "mv /mnt/flash/startup-config.ztp /mnt/flash/startup-config" in output
+    assert output.rstrip().endswith("exit 0")
