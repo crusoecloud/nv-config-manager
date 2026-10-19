@@ -239,14 +239,19 @@ def test_arista_boot_script_provisions_from_the_ztp_service(
     assert f'ZTP_SERVER="http://{ztp_servers(public_leaf_data)[0]}"' in output
     assert f'DEVICE_URL="$ZTP_SERVER/v1/device/{device_uuid(public_leaf_data)}"' in output
     assert f'DESIRED_FIRMWARE="{public_leaf_data.firmware.desired_version}"' in output
-    for endpoint in (
-        "validate_serial",
-        "firmware",
-        "firmware/checksum",
-        "config/full-config",
-        "provisioned",
-    ):
+    for endpoint in ("validate_serial", "firmware", "firmware/checksum", "provisioned"):
         assert f'"$DEVICE_URL/{endpoint}"' in output, endpoint
+    # The configuration carries password hashes, so it comes over SFTP, never HTTP.
+    assert (
+        f'CONFIG_URL="sftp://{ztp_servers(public_leaf_data)[0]}:2222/device/'
+        f'{device_uuid(public_leaf_data)}/full-config"'
+    ) in output
+    assert '--output /mnt/flash/startup-config.ztp "$CONFIG_URL"' in output
+    assert '"$DEVICE_URL/config/full-config"' not in output
+    assert (
+        "rm -f /mnt/flash/startup-config.nvcm-backup /mnt/flash/zerotouch-config.nvcm-backup"
+        in output
+    )
     assert "boot system flash:" in output
     assert "mv /mnt/flash/startup-config.ztp /mnt/flash/startup-config" in output
     assert output.rstrip().endswith("exit 0")

@@ -62,7 +62,10 @@ _ENGINEERING_BUILD = re.compile(r"-\d+\.\w+\s+\(engineering build\)$")
 _TECH_SUPPORT_TIMEOUT_SECONDS = 540
 # Either file keeps EOS out of ZeroTouch at boot: a startup-config, or the
 # zerotouch-config that "zerotouch cancel" or "zerotouch disable" leaves behind.
-_ZTP_BLOCKING_FILES = ("flash:startup-config", "flash:zerotouch-config")
+_ZTP_BLOCKING_FILES = ("startup-config", "zerotouch-config")
+# execute_ztp renames each file aside to this name and renames it back if the reload
+# does not happen. The EOS boot script removes the renamed files after ZeroTouch.
+_ZTP_BACKUP_SUFFIX = ".nvcm-backup"
 # Socket errors that mean a request never reached the switch.
 _UNREACHABLE_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EHOSTDOWN)
 
@@ -578,30 +581,59 @@ class AristaConnection(NetworkConnection):
     def execute_ztp(self) -> None:
         """Factory-reset the switch so it re-runs ZeroTouch on its next boot.
 
-        Deleting the startup-config and any zerotouch-config, then reloading,
-        is what makes EOS enter ZeroTouch; the running configuration is
-        deliberately not saved. The reload closes the eAPI connection, which is
-        the expected outcome. A reload request that never reached the switch
-        (refused, unreachable, or answered with an error status) is reported.
+        Moving the startup-config and any zerotouch-config aside, then
+        reloading, is what makes EOS enter ZeroTouch; the running configuration
+        is deliberately not saved. The files are renamed rather than deleted,
+        and renamed back if the reset does not go through, so a later unrelated
+        reboot does not put the switch into ZeroTouch. The reload closes the
+        eAPI connection, which is the expected outcome; a reload request that
+        never reached the switch (refused, unreachable, or answered with an
+        error status) is reported.
         """
-        for path in _ZTP_BLOCKING_FILES:
+        moved: list[str] = []
+        for name in _ZTP_BLOCKING_FILES:
             try:
-                self._node.enable(f"delete {path}")
+                self._node.enable(f"rename flash:{name} flash:{name}{_ZTP_BACKUP_SUFFIX}")
             except pyeapi.eapilib.CommandError as exc:
-                if "No such file" not in str(exc.command_error):
-                    raise NetworkDeviceException(
-                        f"{self._host} could not delete {path}: {exc}"
-                    ) from exc
+                if "No such file" in str(exc.command_error):
+                    continue  # not there, so it cannot block ZeroTouch
+                self._restore_ztp_files(moved)
+                raise NetworkDeviceException(
+                    f"{self._host} could not move flash:{name} aside: {exc}"
+                ) from exc
+            except pyeapi.eapilib.ConnectionError as exc:
+                self._restore_ztp_files(moved)
+                raise NetworkDeviceException(
+                    f"{self._host} could not move flash:{name} aside: {exc}"
+                ) from exc
+            moved.append(name)
+
         try:
             self._node.enable("reload now")
         except pyeapi.eapilib.CommandError as exc:
+            self._restore_ztp_files(moved)
             raise NetworkDeviceException(f"{self._host} refused to reload: {exc}") from exc
         except pyeapi.eapilib.ConnectionError as exc:
             if _reload_never_sent(exc):
+                self._restore_ztp_files(moved)
                 raise NetworkDeviceException(
                     f"{self._host} did not receive the reload: {exc}"
                 ) from exc
             logger.info("eAPI connection to %s closed by the reload", self._host)
+
+    def _restore_ztp_files(self, names: list[str]) -> None:
+        """Rename back the files execute_ztp moved aside, after a reset that did not happen."""
+        for name in names:
+            try:
+                self._node.enable(f"rename flash:{name}{_ZTP_BACKUP_SUFFIX} flash:{name}")
+            except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
+                logger.error(
+                    "Could not restore flash:%s on %s; it is still at flash:%s%s",
+                    name,
+                    self._host,
+                    name,
+                    _ZTP_BACKUP_SUFFIX,
+                )
 
     def get_ztp_status(self) -> str:
         """Report ``success`` once the switch runs its provisioned configuration.

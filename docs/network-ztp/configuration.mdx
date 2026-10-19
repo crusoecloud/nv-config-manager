@@ -49,7 +49,7 @@ option boot-file-name "http://ztp.example.com/v1/device/{device_uuid}/config/ztp
 boot-file-name http://{{ ztp_server }}/v1/device/{{ device_id }}/boot-script
 ```
 
-EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, and writes `full-config` as the startup-config. EOS then reloads with that configuration, and the switch reports itself provisioned once eAPI is up after the reload. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device deletes its startup-config and reloads it, which starts ZeroTouch.
+EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, and fetches `full-config` from the source-IP-authorized SFTP service and writes it as the startup-config. EOS then reloads with that configuration, and the switch reports itself provisioned once eAPI is up after the reload. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device renames its startup-config and any zerotouch-config aside on flash, renaming them back if the reload does not go through, and reloads it, which starts ZeroTouch.
 
 Replace `ztp.example.com` with your ZTP server URL and `{device_uuid}` with the device UUID from the device management system.
 
@@ -202,7 +202,7 @@ Contact your system administrator for the specific configuration file names for 
 
 ### Security
 
-1. **Protect rendered configuration**: Use the default SFTP transport for Cumulus `startup.yaml`; restrict bootstrap HTTP to the private provisioning network
+1. **Protect rendered configuration**: Use the default SFTP transport for Cumulus `startup.yaml` and Arista EOS `full-config`; restrict bootstrap HTTP to the private provisioning network
 1. **Verify Checksums**: Always verify firmware checksums before installation
 1. **Validate Serial Numbers**: Use the serial validation endpoint before provisioning
 1. **Monitor Provisioning**: Correlate the ZTP `http-lb` and `sftp` container logs during provisioning

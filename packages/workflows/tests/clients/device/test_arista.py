@@ -19,7 +19,7 @@ import io
 import json
 import tarfile
 from typing import cast
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pyeapi.eapilib
 import pytest
@@ -469,7 +469,19 @@ def _connection_error(cause: BaseException | None) -> pyeapi.eapilib.ConnectionE
     return error
 
 
-_MISSING_FILE = "Error deleting flash:/{} (No such file or directory)"
+_MISSING_FILE = "Error renaming flash:/{} (No such file or directory)"
+_MOVE_ASIDE = [
+    "rename flash:startup-config flash:startup-config.nvcm-backup",
+    "rename flash:zerotouch-config flash:zerotouch-config.nvcm-backup",
+]
+_RESTORE = [
+    "rename flash:startup-config.nvcm-backup flash:startup-config",
+    "rename flash:zerotouch-config.nvcm-backup flash:zerotouch-config",
+]
+
+
+def _commands(node: MagicMock) -> list[str]:
+    return [c.args[0] for c in node.enable.call_args_list]
 
 
 @pytest.mark.parametrize(
@@ -480,25 +492,21 @@ _MISSING_FILE = "Error deleting flash:/{} (No such file or directory)"
         TimeoutError("timed out"),
     ],
 )
-def test_execute_ztp_deletes_what_blocks_zerotouch_and_reloads(cause: BaseException) -> None:
+def test_execute_ztp_moves_aside_what_blocks_zerotouch_then_reloads(
+    cause: BaseException,
+) -> None:
     conn = _arista_connection()
     conn._node = _eapi_node({}, {}, _connection_error(cause))
 
     conn.execute_ztp()
 
-    assert [c.args[0] for c in conn._node.enable.call_args_list] == [
-        "delete flash:startup-config",
-        "delete flash:zerotouch-config",
-        "reload now",
-    ]
+    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now"]
 
 
-def test_execute_ztp_tolerates_missing_files() -> None:
+def test_execute_ztp_skips_files_that_are_not_there() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
-        pyeapi.eapilib.CommandError(
-            1000, "could not run command", command_error=_MISSING_FILE.format("startup-config")
-        ),
+        {},
         pyeapi.eapilib.CommandError(
             1000, "could not run command", command_error=_MISSING_FILE.format("zerotouch-config")
         ),
@@ -507,15 +515,18 @@ def test_execute_ztp_tolerates_missing_files() -> None:
 
     conn.execute_ztp()
 
-    assert conn._node.enable.call_count == 3
+    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now"]
 
 
-def test_execute_ztp_reports_a_refused_reload() -> None:
+def test_execute_ztp_renames_the_files_back_when_the_reload_is_refused() -> None:
     conn = _arista_connection()
-    conn._node = _eapi_node({}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"))
+    conn._node = _eapi_node(
+        {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), {}, {}
+    )
 
     with pytest.raises(NetworkDeviceException, match="refused to reload"):
         conn.execute_ztp()
+    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now", *_RESTORE]
 
 
 @pytest.mark.parametrize(
@@ -526,14 +537,40 @@ def test_execute_ztp_reports_a_refused_reload() -> None:
         None,  # eAPI answered with an error status, such as a 401
     ],
 )
-def test_execute_ztp_reports_a_reload_that_never_reached_the_switch(
+def test_execute_ztp_renames_the_files_back_when_the_reload_never_reached_the_switch(
     cause: BaseException | None,
 ) -> None:
     conn = _arista_connection()
-    conn._node = _eapi_node({}, {}, _connection_error(cause))
+    conn._node = _eapi_node({}, {}, _connection_error(cause), {}, {})
 
     with pytest.raises(NetworkDeviceException, match="did not receive the reload"):
         conn.execute_ztp()
+    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now", *_RESTORE]
+
+
+def test_execute_ztp_renames_back_what_it_moved_when_a_rename_fails() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node({}, pyeapi.eapilib.CommandError(1000, "could not run command"), {})
+
+    with pytest.raises(NetworkDeviceException, match="could not move flash:zerotouch-config"):
+        conn.execute_ztp()
+    assert _commands(conn._node) == [*_MOVE_ASIDE, _RESTORE[0]]
+
+
+def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        {},
+        {},
+        pyeapi.eapilib.CommandError(1002, "Unavailable command"),
+        pyeapi.eapilib.CommandError(1000, "could not run command"),
+        {},
+    )
+
+    with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException):
+        conn.execute_ztp()
+    logger.error.assert_called_once()
+    assert "startup-config" in logger.error.call_args.args
 
 
 def test_get_ztp_status_is_success_once_zerotouch_is_disabled() -> None:

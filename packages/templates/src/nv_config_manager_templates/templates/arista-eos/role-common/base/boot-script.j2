@@ -7,6 +7,9 @@
 
 ZTP_SERVER="http://{{ (device_data|ztp_servers)[0] }}"
 DEVICE_URL="$ZTP_SERVER/v1/device/{{ device_data|uuid }}"
+# The rendered configuration carries password hashes, so it comes from the ZTP
+# service's SFTP endpoint, which authorizes by source address, rather than over HTTP.
+CONFIG_URL="sftp://{{ (device_data|ztp_servers)[0] }}:2222/device/{{ device_data|uuid }}/full-config"
 DESIRED_FIRMWARE="{{ device_data|desired_firmware }}"
 IMAGE="EOS-$DESIRED_FIRMWARE.swi"
 
@@ -81,12 +84,16 @@ fi
 
 {% block configuration %}
 # The rendered intended configuration becomes the startup-config the reload boots with.
-retry_curl --fail --output /mnt/flash/startup-config.ztp "$DEVICE_URL/config/full-config"
+retry_curl --fail --insecure --user ztp:ztp --output /mnt/flash/startup-config.ztp "$CONFIG_URL"
 test -s /mnt/flash/startup-config.ztp
 mv /mnt/flash/startup-config.ztp /mnt/flash/startup-config
 {% endblock %}
 
 {% block extras %}{% endblock %}
+
+# A reprovision renames the old startup-config and zerotouch-config aside on flash and
+# leaves them there through the reset; this switch is past that point.
+rm -f /mnt/flash/startup-config.nvcm-backup /mnt/flash/zerotouch-config.nvcm-backup
 
 {% block report_provisioned %}
 # Config Manager backs a device up as soon as it is marked provisioned, and EOS reloads the
