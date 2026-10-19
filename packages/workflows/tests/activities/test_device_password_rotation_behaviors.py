@@ -173,6 +173,24 @@ nv set system aaa user cumulus hashed-password $6$newpassword"""
         assert result.is_valid is False
         assert result.error_message == "Diff contains no password changes for user 'admin'"
 
+    @pytest.mark.parametrize(
+        "changed_line",
+        [
+            "-------------",  # a removed banner separator ("-" plus "------------")
+            "+++ banner text",  # an added line whose text starts with "++ "
+        ],
+    )
+    def test_eos_change_that_looks_like_a_diff_header_fails(self, changed_line: str) -> None:
+        """Inside a hunk, a line starting with "---" or "+++" is a change, not a header."""
+        diff = f"{self.EOS_DIFF}\n{changed_line}"
+        result = asyncio.run(
+            validate_password_diff(
+                ValidatePasswordDiffInput(diff=diff, username="admin", platform="eos")
+            )
+        )
+        assert result.is_valid is False
+        assert result.invalid_lines == [changed_line]
+
     def test_mixed_changes_fails(self) -> None:
         """Test that diff with password + other changes fails."""
         diff = """nv unset system aaa user cumulus hashed-password *

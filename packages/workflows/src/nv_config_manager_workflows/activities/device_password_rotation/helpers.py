@@ -26,9 +26,12 @@ _JUNOS_EDIT_HEADER_RE = re.compile(r"^\[edit\s+(.+)\]$")
 _JUNOS_PASSWORD_LINE_RE = re.compile(
     r'^[+-]\s*encrypted-password\s+"\$[0-9]\$\S+";(\s*##\s*SECRET-DATA)?$'
 )
-# EOS session diffs are unified diffs: "---"/"+++" headers, "@@" hunks, context lines
-# with a leading space, and changed lines whose sign is followed directly by the text.
-_EOS_DIFF_NOISE_RE = re.compile(r"^(---|\+\+\+|@@)")
+# EOS session diffs are unified diffs: "--- "/"+++ " file headers, "@@ -a,b +c,d @@" hunk
+# markers, context lines with a leading space, and changed lines whose sign is followed
+# directly by the text. A changed line can itself start with "--" or "++" (a banner
+# separator, say), so file headers are only recognised before the first hunk.
+_EOS_DIFF_FILE_HEADER_RE = re.compile(r"^(?:---|\+\+\+) ")
+_EOS_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 
 
 def _validate_cumulus_diff(diff: str, username: str) -> ValidatePasswordDiffOutput:
@@ -138,10 +141,16 @@ def _validate_eos_diff(diff: str, username: str) -> ValidatePasswordDiffOutput:
     invalid_lines: list[str] = []
     prefixes: dict[str, set[str]] = {"-": set(), "+": set()}
 
+    in_hunk = False
     for raw_line in diff.split("\n"):
         line = raw_line.rstrip()
-        if not line.strip() or _EOS_DIFF_NOISE_RE.match(line) or line[0] == " ":
-            continue  # headers, hunk markers and unchanged context
+        if not line.strip() or line[0] == " ":
+            continue  # unchanged context
+        if _EOS_DIFF_HUNK_RE.match(line):
+            in_hunk = True
+            continue
+        if not in_hunk and _EOS_DIFF_FILE_HEADER_RE.match(line):
+            continue  # file headers come before the first hunk
         match = line_re.match(line)
         if match:
             valid_lines.append(line)

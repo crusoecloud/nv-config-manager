@@ -224,10 +224,10 @@ def test_cumulus_sftp_startup_download_uses_default_vrf_without_eth0_address(
 
 
 def test_arista_users_include_renders_one_sha512_secret_per_account(
-    public_leaf_data, public_location_data
+    public_leaf_data, public_location_data, monkeypatch
 ) -> None:
     """The EOS account lines the password rotation validator expects."""
-    os.environ["NV_CONFIG_MANAGER_SKIP_VAULT"] = "1"
+    monkeypatch.setenv("NV_CONFIG_MANAGER_SKIP_VAULT", "1")
     render_data = RenderData(device=public_leaf_data, location=public_location_data)
 
     output = Renderer().render("arista-eos/role-common/include/users.j2", render_data)
@@ -242,3 +242,21 @@ def test_arista_users_include_renders_one_sha512_secret_per_account(
             r"secret sha512 \$6\$H0QFj2rx\$[./A-Za-z0-9]+",
             line,
         ), line
+
+
+def test_arista_users_include_sets_the_root_password_with_aaa_root(
+    public_leaf_data, public_location_data, monkeypatch
+) -> None:
+    """EOS sets the root password with "aaa root secret", which root rotation expects."""
+    monkeypatch.setenv("NV_CONFIG_MANAGER_SKIP_VAULT", "1")
+    root = public_leaf_data.access.credentials[0].model_copy(update={"username": "root"})
+    device = public_leaf_data.model_copy(
+        update={"access": public_leaf_data.access.model_copy(update={"credentials": (root,)})}
+    )
+    render_data = RenderData(device=device, location=public_location_data)
+
+    output = Renderer().render("arista-eos/role-common/include/users.j2", render_data)
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert re.fullmatch(r"aaa root secret sha512 \$6\$H0QFj2rx\$[./A-Za-z0-9]+", lines[0]), lines[0]
