@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import io
 import re
@@ -59,6 +60,25 @@ _ENGINEERING_BUILD = re.compile(r"-\d+\.\w+\s+\(engineering build\)$")
 
 # Below the 600 s tech-support activity timeout.
 _TECH_SUPPORT_TIMEOUT_SECONDS = 540
+# Either file keeps EOS out of ZeroTouch at boot: a startup-config, or the
+# zerotouch-config that "zerotouch cancel" or "zerotouch disable" leaves behind.
+_ZTP_BLOCKING_FILES = ("flash:startup-config", "flash:zerotouch-config")
+# Socket errors that mean a request never reached the switch.
+_UNREACHABLE_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EHOSTDOWN)
+
+
+def _reload_never_sent(exc: pyeapi.eapilib.ConnectionError) -> bool:
+    """Whether a failed "reload now" means the switch never got the request.
+
+    pyeapi raises ConnectionError with the socket error as its context. No
+    context means eAPI answered with an error status, such as a 401; a refused
+    or unreachable socket means the request did not leave. Anything else, a
+    reset or a timeout, is the reload taking the connection down.
+    """
+    cause = exc.__context__
+    if cause is None or isinstance(cause, ConnectionRefusedError):
+        return True
+    return isinstance(cause, OSError) and cause.errno in _UNREACHABLE_ERRNOS
 
 
 class AristaConnection(NetworkConnection):
@@ -558,22 +578,29 @@ class AristaConnection(NetworkConnection):
     def execute_ztp(self) -> None:
         """Factory-reset the switch so it re-runs ZeroTouch on its next boot.
 
-        Deleting the startup-config and reloading is what makes EOS enter
-        ZeroTouch; the running configuration is deliberately not saved. The
-        reload closes the eAPI connection, which is the expected outcome.
+        Deleting the startup-config and any zerotouch-config, then reloading,
+        is what makes EOS enter ZeroTouch; the running configuration is
+        deliberately not saved. The reload closes the eAPI connection, which is
+        the expected outcome. A reload request that never reached the switch
+        (refused, unreachable, or answered with an error status) is reported.
         """
-        try:
-            self._node.enable("delete flash:startup-config")
-        except pyeapi.eapilib.CommandError as exc:
-            if "No such file" not in str(exc.command_error):
-                raise NetworkDeviceException(
-                    f"{self._host} could not delete its startup-config: {exc}"
-                ) from exc
+        for path in _ZTP_BLOCKING_FILES:
+            try:
+                self._node.enable(f"delete {path}")
+            except pyeapi.eapilib.CommandError as exc:
+                if "No such file" not in str(exc.command_error):
+                    raise NetworkDeviceException(
+                        f"{self._host} could not delete {path}: {exc}"
+                    ) from exc
         try:
             self._node.enable("reload now")
         except pyeapi.eapilib.CommandError as exc:
             raise NetworkDeviceException(f"{self._host} refused to reload: {exc}") from exc
-        except pyeapi.eapilib.ConnectionError:
+        except pyeapi.eapilib.ConnectionError as exc:
+            if _reload_never_sent(exc):
+                raise NetworkDeviceException(
+                    f"{self._host} did not receive the reload: {exc}"
+                ) from exc
             logger.info("eAPI connection to %s closed by the reload", self._host)
 
     def get_ztp_status(self) -> str:

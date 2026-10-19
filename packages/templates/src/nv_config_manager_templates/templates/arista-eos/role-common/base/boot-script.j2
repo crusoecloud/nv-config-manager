@@ -19,6 +19,8 @@ function error() {
   exit 1
 }
 trap error ERR
+# A failing command inside a pipeline fails the pipeline, so the trap fires.
+set -o pipefail
 
 function retry_curl() {
   local attempt=1

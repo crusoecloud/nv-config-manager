@@ -234,6 +234,8 @@ def test_arista_boot_script_provisions_from_the_ztp_service(
     output = Renderer().render("arista-eos/role-common/base/boot-script.j2", render_data)
 
     assert output.startswith("#!/bin/bash\n")
+    assert "trap error ERR\n" in output
+    assert "set -o pipefail\n" in output
     assert f'ZTP_SERVER="http://{ztp_servers(public_leaf_data)[0]}"' in output
     assert f'DEVICE_URL="$ZTP_SERVER/v1/device/{device_uuid(public_leaf_data)}"' in output
     assert f'DESIRED_FIRMWARE="{public_leaf_data.firmware.desired_version}"' in output
