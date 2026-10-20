@@ -104,28 +104,39 @@ class _PasswordFallbackNode(Node):
             ) from unauthorized
         original = self._enablepwd
         for password in self._candidate_passwords():
-            self.connection.authentication(self._fallback_username, password)
-            self.enable_authentication(password)
+            self._use_password(password)
             try:
                 result = super().run_commands(commands, *args, **kwargs)
+            except pyeapi.eapilib.CommandError:
+                # eAPI accepted the password; a command in the request failed.
+                self._password_worked(password)
+                raise
             except pyeapi.eapilib.ConnectionError as exc:
-                if "unauthorized" not in str(exc).lower():
-                    raise
-                continue
-            logger.warning(
-                "eAPI on %s rejected the password in use for %s; another known password worked",
-                self._fallback_host,
-                self._fallback_username,
-            )
-            self._on_password(password)
+                if "unauthorized" in str(exc).lower():
+                    continue
+                # Whether this password works is unknown, so go back to the one in use.
+                self._use_password(original)
+                raise
+            self._password_worked(password)
             return result
         self._fallback_spent = True
-        self.connection.authentication(self._fallback_username, original)
-        self.enable_authentication(original)
+        self._use_password(original)
         raise NetworkDeviceException(
             f"eAPI on {self._fallback_host} rejected every known password for "
             f"{self._fallback_username}"
         ) from unauthorized
+
+    def _use_password(self, password: str | None) -> None:
+        self.connection.authentication(self._fallback_username, password)
+        self.enable_authentication(password)
+
+    def _password_worked(self, password: str) -> None:
+        logger.warning(
+            "eAPI on %s rejected the password in use for %s; another known password worked",
+            self._fallback_host,
+            self._fallback_username,
+        )
+        self._on_password(password)
 
 
 class AristaConnection(NetworkConnection):

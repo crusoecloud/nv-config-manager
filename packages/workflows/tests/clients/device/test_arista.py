@@ -567,6 +567,44 @@ def test_fallback_node_leaves_other_connection_errors_alone() -> None:
     assert connection.authentications == []
 
 
+def test_fallback_node_puts_the_original_password_back_when_a_retry_fails_otherwise() -> None:
+    connection = _FakeEapiConnection(accepted="r1", first="r2")
+    node, remembered = _fallback_node(connection, "r1")
+    errors = [
+        pyeapi.eapilib.ConnectionError("eapi", "Unauthorized. Unauthorized"),
+        pyeapi.eapilib.ConnectionError("eapi", "timed out"),
+    ]
+
+    with (
+        patch.object(connection, "execute", side_effect=errors),
+        pytest.raises(pyeapi.eapilib.ConnectionError, match="timed out"),
+    ):
+        node.enable("show hostname")
+    assert connection.password == "r2"
+    assert remembered == []
+
+    # The fallback is not spent, so the next 401 still tries the other password.
+    node.enable("show hostname")
+    assert remembered == ["r1"]
+
+
+def test_fallback_node_keeps_a_password_that_eapi_accepted_for_a_failed_command() -> None:
+    connection = _FakeEapiConnection(accepted="r1", first="r2")
+    node, remembered = _fallback_node(connection, "r1")
+    errors = [
+        pyeapi.eapilib.ConnectionError("eapi", "Unauthorized. Unauthorized"),
+        pyeapi.eapilib.CommandError(1002, "CLI command 2 of 2 'show hostnme' failed"),
+    ]
+
+    with (
+        patch.object(connection, "execute", side_effect=errors),
+        pytest.raises(pyeapi.eapilib.CommandError),
+    ):
+        node.enable("show hostnme")
+    assert connection.password == "r1"
+    assert remembered == ["r1"]
+
+
 def test_connect_starts_with_the_newest_password_and_keeps_the_rest_for_fallback() -> None:
     conn = AristaConnection.__new__(AristaConnection)
     conn._host, conn._port, conn._username = "192.0.2.1", 443, "svc"
