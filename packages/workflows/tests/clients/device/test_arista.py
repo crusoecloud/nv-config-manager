@@ -474,10 +474,35 @@ _MOVE_ASIDE = [
     "rename flash:startup-config flash:startup-config.nvcm-backup",
     "rename flash:zerotouch-config flash:zerotouch-config.nvcm-backup",
 ]
-_RESTORE = [
-    "rename flash:startup-config.nvcm-backup flash:startup-config",
-    "rename flash:zerotouch-config.nvcm-backup flash:zerotouch-config",
-]
+
+
+def _restore(name: str) -> list[str]:
+    """The commands that check for a moved file and rename it back."""
+    return [
+        f"show file information flash:{name}",
+        f"show file information flash:{name}.nvcm-backup",
+        f"rename flash:{name}.nvcm-backup flash:{name}",
+    ]
+
+
+_RESTORE = [*_restore("startup-config"), *_restore("zerotouch-config")]
+
+
+def _no_such_file(name: str) -> pyeapi.eapilib.CommandError:
+    """What "show file information" raises for a file that is not on flash."""
+    return pyeapi.eapilib.CommandError(
+        1000,
+        "could not run command",
+        command_error=f"Error getting information about flash:{name} (No such file or directory)",
+    )
+
+
+def _restore_answers(name: str) -> list[object]:
+    """eAPI answers when the original is gone and the backup is there."""
+    return [_no_such_file(name), {}, {}]
+
+
+_RESTORE_ANSWERS = [*_restore_answers("startup-config"), *_restore_answers("zerotouch-config")]
 
 
 def _commands(node: MagicMock) -> list[str]:
@@ -521,7 +546,7 @@ def test_execute_ztp_skips_files_that_are_not_there() -> None:
 def test_execute_ztp_renames_the_files_back_when_the_reload_is_refused() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
-        {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), {}, {}
+        {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), *_RESTORE_ANSWERS
     )
 
     with pytest.raises(NetworkDeviceException, match="refused to reload"):
@@ -541,7 +566,7 @@ def test_execute_ztp_renames_the_files_back_when_the_reload_never_reached_the_sw
     cause: BaseException | None,
 ) -> None:
     conn = _arista_connection()
-    conn._node = _eapi_node({}, {}, _connection_error(cause), {}, {})
+    conn._node = _eapi_node({}, {}, _connection_error(cause), *_RESTORE_ANSWERS)
 
     with pytest.raises(NetworkDeviceException, match="did not receive the reload"):
         conn.execute_ztp()
@@ -550,11 +575,41 @@ def test_execute_ztp_renames_the_files_back_when_the_reload_never_reached_the_sw
 
 def test_execute_ztp_renames_back_what_it_moved_when_a_rename_fails() -> None:
     conn = _arista_connection()
-    conn._node = _eapi_node({}, pyeapi.eapilib.CommandError(1000, "could not run command"), {})
+    conn._node = _eapi_node(
+        {},
+        pyeapi.eapilib.CommandError(1000, "could not run command"),
+        *_restore_answers("startup-config"),
+        {},  # zerotouch-config is still in place
+    )
 
     with pytest.raises(NetworkDeviceException, match="could not move flash:zerotouch-config"):
         conn.execute_ztp()
-    assert _commands(conn._node) == [*_MOVE_ASIDE, _RESTORE[0]]
+    assert _commands(conn._node) == [
+        *_MOVE_ASIDE,
+        *_restore("startup-config"),
+        "show file information flash:zerotouch-config",
+    ]
+
+
+def test_execute_ztp_renames_back_a_file_whose_rename_ran_before_the_connection_dropped() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        _connection_error(TimeoutError("timed out")), *_restore_answers("startup-config")
+    )
+
+    with pytest.raises(NetworkDeviceException, match="could not move flash:startup-config"):
+        conn.execute_ztp()
+    assert _commands(conn._node) == [_MOVE_ASIDE[0], *_restore("startup-config")]
+
+
+def test_execute_ztp_keeps_the_original_over_an_older_backup() -> None:
+    """The rename did not run, so the backup left by an earlier reset must not replace the file."""
+    conn = _arista_connection()
+    conn._node = _eapi_node(_connection_error(ConnectionRefusedError(111, "refused")), {})
+
+    with pytest.raises(NetworkDeviceException, match="could not move flash:startup-config"):
+        conn.execute_ztp()
+    assert _commands(conn._node) == [_MOVE_ASIDE[0], "show file information flash:startup-config"]
 
 
 def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
@@ -563,8 +618,10 @@ def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
         {},
         {},
         pyeapi.eapilib.CommandError(1002, "Unavailable command"),
-        pyeapi.eapilib.CommandError(1000, "could not run command"),
+        _no_such_file("startup-config"),
         {},
+        pyeapi.eapilib.CommandError(1000, "could not run command"),
+        *_restore_answers("zerotouch-config"),
     )
 
     with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException):

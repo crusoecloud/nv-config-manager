@@ -597,12 +597,13 @@ class AristaConnection(NetworkConnection):
             except pyeapi.eapilib.CommandError as exc:
                 if "No such file" in str(exc.command_error):
                     continue  # not there, so it cannot block ZeroTouch
-                self._restore_ztp_files(moved)
+                self._restore_ztp_files([*moved, name])
                 raise NetworkDeviceException(
                     f"{self._host} could not move flash:{name} aside: {exc}"
                 ) from exc
             except pyeapi.eapilib.ConnectionError as exc:
-                self._restore_ztp_files(moved)
+                # The rename may have run before the connection dropped.
+                self._restore_ztp_files([*moved, name])
                 raise NetworkDeviceException(
                     f"{self._host} could not move flash:{name} aside: {exc}"
                 ) from exc
@@ -622,18 +623,34 @@ class AristaConnection(NetworkConnection):
             logger.info("eAPI connection to %s closed by the reload", self._host)
 
     def _restore_ztp_files(self, names: list[str]) -> None:
-        """Rename back the files execute_ztp moved aside, after a reset that did not happen."""
+        """Rename back the files execute_ztp moved aside, after a reset that did not happen.
+
+        A file is renamed back only when the original is gone and the backup is
+        there. A rename whose response was lost may still have run, and renaming
+        a backup left by an earlier reset over an existing file would replace it.
+        """
         for name in names:
+            backup = f"{name}{_ZTP_BACKUP_SUFFIX}"
             try:
-                self._node.enable(f"rename flash:{name}{_ZTP_BACKUP_SUFFIX} flash:{name}")
+                if self._flash_file_exists(name) or not self._flash_file_exists(backup):
+                    continue
+                self._node.enable(f"rename flash:{backup} flash:{name}")
             except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
                 logger.error(
-                    "Could not restore flash:%s on %s; it is still at flash:%s%s",
+                    "Could not restore flash:%s on %s; it may still be at flash:%s",
                     name,
                     self._host,
-                    name,
-                    _ZTP_BACKUP_SUFFIX,
+                    backup,
                 )
+
+    def _flash_file_exists(self, name: str) -> bool:
+        try:
+            self._node.enable(f"show file information flash:{name}")
+        except pyeapi.eapilib.CommandError as exc:
+            if "No such file" in str(exc.command_error):
+                return False
+            raise
+        return True
 
     def get_ztp_status(self) -> str:
         """Report ``success`` once the switch runs its provisioned configuration.
