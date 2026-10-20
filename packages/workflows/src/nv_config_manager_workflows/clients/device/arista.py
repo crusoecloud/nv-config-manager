@@ -65,24 +65,30 @@ class _PasswordFallbackNode(Node):
     """A pyeapi node that retries a rejected request with the other known passwords.
 
     pyeapi sends nothing when it connects, so a stale password only shows up as
-    a 401 on the first command. Each request that eAPI rejects as unauthorized is
+    a 401 on the first command. A request that eAPI rejects as unauthorized is
     retried with the remaining candidate passwords, newest first; the one that
-    works becomes the node's password for the rest of the session.
+    works becomes the node's password for the rest of the session. A pass in
+    which every password fails restores the original one and is not repeated
+    for the rest of the session, since each failed login counts towards the
+    account's lockout.
     """
 
     def __init__(
         self,
         connection: object,
         *,
+        host: str,
         username: str,
         passwords: Callable[[], list[str]],
         on_password: Callable[[str], None],
         **kwargs: object,
     ) -> None:
         super().__init__(connection, **kwargs)
+        self._fallback_host = host
         self._fallback_username = username
         self._candidate_passwords = passwords
         self._on_password = on_password
+        self._fallback_spent = False
 
     def run_commands(self, commands: object, *args: object, **kwargs: object) -> object:
         try:
@@ -91,6 +97,12 @@ class _PasswordFallbackNode(Node):
             if "unauthorized" not in str(exc).lower():
                 raise
             unauthorized = exc
+        if self._fallback_spent:
+            raise NetworkDeviceException(
+                f"eAPI on {self._fallback_host} rejected the password for "
+                f"{self._fallback_username}; the other known passwords already failed"
+            ) from unauthorized
+        original = self._enablepwd
         for password in self._candidate_passwords():
             self.connection.authentication(self._fallback_username, password)
             self.enable_authentication(password)
@@ -100,10 +112,19 @@ class _PasswordFallbackNode(Node):
                 if "unauthorized" not in str(exc).lower():
                     raise
                 continue
+            logger.warning(
+                "eAPI on %s rejected the password in use for %s; another known password worked",
+                self._fallback_host,
+                self._fallback_username,
+            )
             self._on_password(password)
             return result
+        self._fallback_spent = True
+        self.connection.authentication(self._fallback_username, original)
+        self.enable_authentication(original)
         raise NetworkDeviceException(
-            f"eAPI rejected every known password for {self._fallback_username}"
+            f"eAPI on {self._fallback_host} rejected every known password for "
+            f"{self._fallback_username}"
         ) from unauthorized
 
 
@@ -145,6 +166,7 @@ class AristaConnection(NetworkConnection):
             self._working_password = password
             return _PasswordFallbackNode(
                 connection,
+                host=self._host,
                 username=self._username,
                 passwords=self._other_passwords,
                 on_password=self._remember_password,

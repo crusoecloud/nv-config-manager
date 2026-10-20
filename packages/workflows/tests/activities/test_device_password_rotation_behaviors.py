@@ -98,14 +98,49 @@ nv set system aaa user cumulus hashed-password $6$newpassword"""
             "+username admin privilege 15 role network-admin secret sha512 $6$salt$newhash",
         ]
 
-    def test_eos_new_user_line_without_removal_is_valid(self) -> None:
+    def test_eos_added_password_line_without_a_removed_one_fails(self) -> None:
+        """A + line with no matching - line creates the account; it is not a rotation."""
         diff = "+username ops privilege 15 role network-admin secret sha512 $6$s$h"
         result = asyncio.run(
             validate_password_diff(
                 ValidatePasswordDiffInput(diff=diff, username="ops", platform="eos")
             )
         )
-        assert result.is_valid is True
+        assert result.is_valid is False
+        assert result.error_message is not None
+        assert "without replacing one" in result.error_message
+
+    def test_eos_more_than_one_matching_change_fails(self) -> None:
+        """Auto-approval covers one replaced password line, not several."""
+        line = "username admin privilege 15 role network-admin secret sha512 $6$s${}"
+        diff = "\n".join(
+            [
+                f"-{line.format('old1')}",
+                f"+{line.format('new1')}",
+                f"-{line.format('old2')}",
+                f"+{line.format('new2')}",
+            ]
+        )
+        result = asyncio.run(
+            validate_password_diff(
+                ValidatePasswordDiffInput(diff=diff, username="admin", platform="eos")
+            )
+        )
+        assert result.is_valid is False
+        assert result.error_message == "Diff replaces more than one password line for user 'admin'"
+
+    def test_eos_privilege_change_alongside_password_fails(self) -> None:
+        diff = (
+            "-username admin privilege 15 role network-admin secret sha512 $6$s$old\n"
+            "+username admin privilege 1 role network-admin secret sha512 $6$s$new"
+        )
+        result = asyncio.run(
+            validate_password_diff(
+                ValidatePasswordDiffInput(diff=diff, username="admin", platform="eos")
+            )
+        )
+        assert result.is_valid is False
+        assert result.error_message == "Diff changes more than the password of user 'admin'"
 
     def test_eos_root_platform_integration(self) -> None:
         diff = "-aaa root secret sha512 $6$s$old\n+aaa root secret sha512 $6$s$new"

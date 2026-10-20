@@ -493,6 +493,7 @@ def _fallback_node(
     remembered: list[str] = []
     node = arista._PasswordFallbackNode(
         connection,
+        host="192.0.2.1",
         username="svc",
         passwords=lambda: list(others),
         on_password=remembered.append,
@@ -514,13 +515,40 @@ def test_fallback_node_retries_a_rejected_request_with_the_other_passwords() -> 
     assert connection.executed[-1][0] == {"cmd": "enable", "input": "r1"}
 
 
-def test_fallback_node_gives_up_when_every_password_is_rejected() -> None:
+def test_fallback_node_restores_the_original_password_when_every_password_is_rejected() -> None:
     connection = _FakeEapiConnection(accepted="r9", first="r2")
-    node, _ = _fallback_node(connection, "r1", "r0")
+    node, remembered = _fallback_node(connection, "r1", "r0")
 
     with pytest.raises(NetworkDeviceException, match="rejected every known password for svc"):
         node.enable("show hostname")
-    assert [password for _, password in connection.authentications] == ["r1", "r0"]
+    # Each candidate once, then the original password is put back.
+    assert [password for _, password in connection.authentications] == ["r1", "r0", "r2"]
+    assert connection.password == "r2"
+    assert remembered == []
+
+
+def test_fallback_node_tries_the_other_passwords_once_per_session() -> None:
+    """Each failed login counts towards a lockout, so a failed pass is not repeated."""
+    connection = _FakeEapiConnection(accepted="r9", first="r2")
+    node, _ = _fallback_node(connection, "r1", "r0")
+    with pytest.raises(NetworkDeviceException):
+        node.enable("show hostname")
+    authentications, requests = len(connection.authentications), len(connection.executed)
+
+    with pytest.raises(NetworkDeviceException, match="other known passwords already failed"):
+        node.enable("show hostname")
+    assert len(connection.authentications) == authentications
+    assert len(connection.executed) == requests + 1
+
+
+def test_fallback_node_warns_when_another_password_works() -> None:
+    connection = _FakeEapiConnection(accepted="r1", first="r2")
+    node, _ = _fallback_node(connection, "r1")
+
+    with patch.object(arista, "logger") as logger:
+        node.enable("show hostname")
+    logger.warning.assert_called_once()
+    assert "192.0.2.1" in logger.warning.call_args.args
 
 
 def test_fallback_node_leaves_other_connection_errors_alone() -> None:
