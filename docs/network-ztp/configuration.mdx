@@ -49,7 +49,22 @@ option boot-file-name "http://ztp.example.com/v1/device/{device_uuid}/config/ztp
 boot-file-name http://{{ ztp_server }}/v1/device/{{ device_id }}/boot-script
 ```
 
-EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script validates the serial number against the DCIM, downloads and verifies the firmware image and makes it the boot image when the running release differs from the intended one, and fetches `full-config` from the source-IP-authorized SFTP service and writes it as the startup-config. EOS then reloads with that configuration, and the switch reports itself provisioned once eAPI is up after the reload. `full-config` is the intended EOS configuration rendered by the `arista-eos` role templates. Reprovisioning an EOS device renames its startup-config and any zerotouch-config aside on flash, renaming them back if the reload does not go through, and reloads it, which starts ZeroTouch.
+EOS enters ZeroTouch when it boots without a startup-config, downloads the script and runs it. The bundled `arista-eos` boot script:
+
+1. Validates the serial number against the DCIM.
+1. Downloads and verifies the firmware image and makes it the boot image, when the running release differs from the intended one.
+1. Fetches `full-config` from the source-IP-authorized SFTP service and writes it as the startup-config.
+
+EOS then reloads with that configuration, and the switch reports itself provisioned once eAPI is up after the reload.
+
+Config Manager bundles the EOS boot script but no EOS role templates. Before you provision or reprovision an EOS device:
+
+- Provide the intended EOS `full-config` through your template plugin or configuration source.
+- Provide a matching `boot-script` entrypoint for the device's role and intended release. Entrypoints are matched on platform, role, and intended firmware, and the bundled tree only has `arista-eos/spx-leaf/4.34.3M`.
+- Check that both `boot-script` and `full-config` exist for the device in Config Store.
+- Make sure the intended configuration enables HTTPS eAPI and keeps the ZTP server reachable from the VRF that eAPI runs in. The switch reports itself provisioned from that VRF after the reload.
+
+Reprovisioning an EOS device renames its startup-config and any zerotouch-config aside on flash and schedules a reload five minutes ahead, which starts ZeroTouch. If EOS does not confirm the scheduled reload, Config Manager renames the files back and cancels the reload.
 
 Replace `ztp.example.com` with your ZTP server URL and `{device_uuid}` with the device UUID from the device management system.
 
