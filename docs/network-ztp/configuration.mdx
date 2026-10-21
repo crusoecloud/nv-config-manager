@@ -82,7 +82,7 @@ The ONIE installer will automatically append `.ztp` to the URL if it points to a
 Ensure devices can reach the ZTP server:
 
 - **DHCP traffic**: Devices must be able to exchange DHCP packets with the Config Manager DHCP service on UDP 67/68.
-- **ZTP service traffic**: Devices must be able to access the configured HTTP or HTTPS bootstrap listener and TCP 2222 for the default Cumulus rendered-configuration download.
+- **ZTP service traffic**: Devices must be able to access the configured HTTP or HTTPS bootstrap listener and TCP 2222 for the Cumulus rendered-configuration and Arista EOS `full-config` downloads.
 - **DNS resolution**: Devices must be able to resolve the ZTP server hostname, which requires UDP/TCP 53 if hostnames are used.
 - **IP address registration**: Device IP addresses must be registered in the device management system.
 
