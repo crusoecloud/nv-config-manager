@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import errno
 import gzip
 import io
 import re
@@ -66,22 +65,11 @@ _ZTP_BLOCKING_FILES = ("startup-config", "zerotouch-config")
 # execute_ztp renames each file aside to this name and renames it back if the reload
 # does not happen. The EOS boot script removes the renamed files after ZeroTouch.
 _ZTP_BACKUP_SUFFIX = ".nvcm-backup"
-# Socket errors that mean a request never reached the switch.
-_UNREACHABLE_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EHOSTDOWN)
-
-
-def _reload_never_sent(exc: pyeapi.eapilib.ConnectionError) -> bool:
-    """Whether a failed "reload now" means the switch never got the request.
-
-    pyeapi raises ConnectionError with the socket error as its context. No
-    context means eAPI answered with an error status, such as a 401; a refused
-    or unreachable socket means the request did not leave. Anything else, a
-    reset or a timeout, is the reload taking the connection down.
-    """
-    cause = exc.__context__
-    if cause is None or isinstance(cause, ConnectionRefusedError):
-        return True
-    return isinstance(cause, OSError) and cause.errno in _UNREACHABLE_ERRNOS
+# execute_ztp schedules the reload so EOS answers before it goes down. When the answer
+# is lost, the files are renamed back and the reload cancelled first: up to eight
+# requests (reload, two files at three each, cancel) at the request timeout, so 4 min.
+_ZTP_RELOAD_DELAY = "00:05"
+_ZTP_RELOAD_REQUEST_TIMEOUT_SECONDS = 30
 
 
 class _PasswordFallbackNode(Node):
@@ -679,10 +667,10 @@ class AristaConnection(NetworkConnection):
         reloading, is what makes EOS enter ZeroTouch; the running configuration
         is deliberately not saved. The files are renamed rather than deleted,
         and renamed back if the reset does not go through, so a later unrelated
-        reboot does not put the switch into ZeroTouch. The reload closes the
-        eAPI connection, which is the expected outcome; a reload request that
-        never reached the switch (refused, unreachable, or answered with an
-        error status) is reported.
+        reboot does not put the switch into ZeroTouch. The reload is scheduled
+        a short time ahead so EOS confirms it before going down. Without that
+        confirmation the reload may or may not be scheduled, so the files are
+        renamed back and the reload is cancelled.
         """
         moved: list[str] = []
         for name in _ZTP_BLOCKING_FILES:
@@ -703,18 +691,25 @@ class AristaConnection(NetworkConnection):
                 ) from exc
             moved.append(name)
 
+        transport = self._node.connection.transport
+        default_timeout = transport.timeout
+        transport.timeout = _ZTP_RELOAD_REQUEST_TIMEOUT_SECONDS
         try:
-            self._node.enable("reload now")
-        except pyeapi.eapilib.CommandError as exc:
+            # strict: never resend this command with another encoding.
+            self._node.enable(f"reload in {_ZTP_RELOAD_DELAY} force", encoding="text", strict=True)
+        except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError) as exc:
             self._restore_ztp_files(moved)
-            raise NetworkDeviceException(f"{self._host} refused to reload: {exc}") from exc
-        except pyeapi.eapilib.ConnectionError as exc:
-            if _reload_never_sent(exc):
-                self._restore_ztp_files(moved)
-                raise NetworkDeviceException(
-                    f"{self._host} did not receive the reload: {exc}"
-                ) from exc
-            logger.info("eAPI connection to %s closed by the reload", self._host)
+            self._cancel_reload()
+            raise NetworkDeviceException(f"{self._host} did not confirm the reload: {exc}") from exc
+        finally:
+            transport.timeout = default_timeout
+        logger.info("%s reloads into ZeroTouch in %s", self._host, _ZTP_RELOAD_DELAY)
+
+    def _cancel_reload(self) -> None:
+        try:
+            self._node.enable("reload cancel", encoding="text", strict=True)
+        except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
+            logger.warning("Could not cancel a possibly scheduled reload on %s", self._host)
 
     def _restore_ztp_files(self, names: list[str]) -> None:
         """Rename back the files execute_ztp moved aside, after a reset that did not happen.

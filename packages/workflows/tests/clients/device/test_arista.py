@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import errno
 import http.client
 import io
 import json
@@ -668,27 +667,26 @@ def _restore_answers(name: str) -> list[object]:
 _RESTORE_ANSWERS = [*_restore_answers("startup-config"), *_restore_answers("zerotouch-config")]
 
 
+_RELOAD = "reload in 00:05 force"
+_CANCEL = "reload cancel"
+
+
 def _commands(node: MagicMock) -> list[str]:
     return [c.args[0] for c in node.enable.call_args_list]
 
 
-@pytest.mark.parametrize(
-    "cause",
-    [
-        ConnectionResetError(104, "Connection reset by peer"),
-        http.client.RemoteDisconnected("Remote end closed connection without response"),
-        TimeoutError("timed out"),
-    ],
-)
-def test_execute_ztp_moves_aside_what_blocks_zerotouch_then_reloads(
-    cause: BaseException,
-) -> None:
+def test_execute_ztp_moves_aside_what_blocks_zerotouch_then_schedules_the_reload() -> None:
     conn = _arista_connection()
-    conn._node = _eapi_node({}, {}, _connection_error(cause))
+    conn._node = _eapi_node({}, {}, {"output": ""})
+    transport = conn._node.connection.transport
+    transport.timeout = 300
 
     conn.execute_ztp()
 
-    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now"]
+    assert _commands(conn._node) == [*_MOVE_ASIDE, _RELOAD]
+    # Sent once, as text: never replayed in another encoding.
+    assert conn._node.enable.call_args.kwargs == {"encoding": "text", "strict": True}
+    assert transport.timeout == 300
 
 
 def test_execute_ztp_skips_files_that_are_not_there() -> None:
@@ -703,37 +701,55 @@ def test_execute_ztp_skips_files_that_are_not_there() -> None:
 
     conn.execute_ztp()
 
-    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now"]
+    assert _commands(conn._node) == [*_MOVE_ASIDE, _RELOAD]
 
 
-def test_execute_ztp_renames_the_files_back_when_the_reload_is_refused() -> None:
+def test_execute_ztp_undoes_the_reset_when_the_reload_is_refused() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
-        {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), *_RESTORE_ANSWERS
+        {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), *_RESTORE_ANSWERS, {}
     )
 
-    with pytest.raises(NetworkDeviceException, match="refused to reload"):
+    with pytest.raises(NetworkDeviceException, match="did not confirm the reload"):
         conn.execute_ztp()
-    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now", *_RESTORE]
+    assert _commands(conn._node) == [*_MOVE_ASIDE, _RELOAD, *_RESTORE, _CANCEL]
 
 
 @pytest.mark.parametrize(
     "cause",
     [
+        TimeoutError("timed out"),
+        ConnectionResetError(104, "Connection reset by peer"),
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
         ConnectionRefusedError(111, "Connection refused"),
-        OSError(errno.EHOSTUNREACH, "No route to host"),
         None,  # eAPI answered with an error status, such as a 401
     ],
 )
-def test_execute_ztp_renames_the_files_back_when_the_reload_never_reached_the_switch(
+def test_execute_ztp_undoes_the_reset_when_the_reload_is_not_confirmed(
     cause: BaseException | None,
 ) -> None:
+    """Without an answer the reload may or may not be scheduled, so both are undone."""
     conn = _arista_connection()
-    conn._node = _eapi_node({}, {}, _connection_error(cause), *_RESTORE_ANSWERS)
+    conn._node = _eapi_node({}, {}, _connection_error(cause), *_RESTORE_ANSWERS, {})
 
-    with pytest.raises(NetworkDeviceException, match="did not receive the reload"):
+    with pytest.raises(NetworkDeviceException, match="did not confirm the reload"):
         conn.execute_ztp()
-    assert _commands(conn._node) == [*_MOVE_ASIDE, "reload now", *_RESTORE]
+    assert _commands(conn._node) == [*_MOVE_ASIDE, _RELOAD, *_RESTORE, _CANCEL]
+
+
+def test_execute_ztp_warns_when_the_reload_cannot_be_cancelled() -> None:
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        {},
+        {},
+        _connection_error(TimeoutError("timed out")),
+        *_RESTORE_ANSWERS,
+        _connection_error(TimeoutError("timed out")),
+    )
+
+    with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException):
+        conn.execute_ztp()
+    logger.warning.assert_called_once()
 
 
 def test_execute_ztp_renames_back_what_it_moved_when_a_rename_fails() -> None:
@@ -785,6 +801,7 @@ def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
         {},
         pyeapi.eapilib.CommandError(1000, "could not run command"),
         *_restore_answers("zerotouch-config"),
+        {},
     )
 
     with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException):
