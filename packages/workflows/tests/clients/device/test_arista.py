@@ -737,9 +737,10 @@ def test_execute_ztp_undoes_the_reset_when_the_reload_is_refused() -> None:
         {}, {}, pyeapi.eapilib.CommandError(1002, "Unavailable command"), *_RESTORE_ANSWERS, {}
     )
 
-    with pytest.raises(NetworkDeviceException, match="did not confirm the reload"):
+    with pytest.raises(NetworkDeviceException, match="did not confirm the reload") as exc:
         conn.execute_ztp()
     assert _commands(conn._node) == [*_MOVE_ASIDE, _RELOAD, *_RESTORE, _CANCEL]
+    assert "may still be at" not in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -857,7 +858,7 @@ def test_execute_ztp_keeps_the_original_over_an_older_backup() -> None:
     ]
 
 
-def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
+def test_execute_ztp_reports_where_a_file_is_when_renaming_it_back_fails() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
         {},
@@ -870,10 +871,13 @@ def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
         {},
     )
 
-    with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException):
+    with patch.object(arista, "logger") as logger, pytest.raises(NetworkDeviceException) as exc:
         conn.execute_ztp()
     logger.error.assert_called_once()
     assert "startup-config" in logger.error.call_args.args
+    assert str(exc.value).endswith(
+        "; flash:startup-config may still be at flash:startup-config.nvcm-backup"
+    )
 
 
 def test_get_ztp_status_is_success_once_zerotouch_is_disabled() -> None:
