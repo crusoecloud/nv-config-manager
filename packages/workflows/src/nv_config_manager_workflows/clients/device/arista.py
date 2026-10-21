@@ -66,10 +66,12 @@ _ZTP_BLOCKING_FILES = ("startup-config", "zerotouch-config")
 # does not happen. The EOS boot script removes the renamed files after ZeroTouch.
 _ZTP_BACKUP_SUFFIX = ".nvcm-backup"
 # execute_ztp schedules the reload so EOS answers before it goes down. When the answer
-# is lost, the files are renamed back and the reload cancelled first: up to eight
-# requests (reload, two files at three each, cancel) at the request timeout, so 4 min.
+# is lost, the files are renamed back and the reload cancelled before it fires.
 _ZTP_RELOAD_DELAY = "00:05"
-_ZTP_RELOAD_REQUEST_TIMEOUT_SECONDS = 30
+# Timeout for every request execute_ztp sends. At most ten requests (two renames, the
+# reload, two files at three each to restore, the cancel) take 200 s, inside both the
+# reload delay and the five-minute activity deadline.
+_ZTP_REQUEST_TIMEOUT_SECONDS = 20
 
 
 class _PasswordFallbackNode(Node):
@@ -670,37 +672,41 @@ class AristaConnection(NetworkConnection):
         reboot does not put the switch into ZeroTouch. The reload is scheduled
         a short time ahead so EOS confirms it before going down. Without that
         confirmation the reload may or may not be scheduled, so the files are
-        renamed back and the reload is cancelled.
+        renamed back and the reload is cancelled. The rollback checks both files,
+        so it also restores a file that an earlier attempt of the activity moved.
         """
-        moved: list[str] = []
-        for name in _ZTP_BLOCKING_FILES:
-            try:
-                self._node.enable(f"rename flash:{name} flash:{name}{_ZTP_BACKUP_SUFFIX}")
-            except pyeapi.eapilib.CommandError as exc:
-                if "No such file" in str(exc.command_error):
-                    continue  # not there, so it cannot block ZeroTouch
-                self._restore_ztp_files([*moved, name])
-                raise NetworkDeviceException(
-                    f"{self._host} could not move flash:{name} aside: {exc}"
-                ) from exc
-            except pyeapi.eapilib.ConnectionError as exc:
-                # The rename may have run before the connection dropped.
-                self._restore_ztp_files([*moved, name])
-                raise NetworkDeviceException(
-                    f"{self._host} could not move flash:{name} aside: {exc}"
-                ) from exc
-            moved.append(name)
-
         transport = self._node.connection.transport
         default_timeout = transport.timeout
-        transport.timeout = _ZTP_RELOAD_REQUEST_TIMEOUT_SECONDS
+        transport.timeout = _ZTP_REQUEST_TIMEOUT_SECONDS
         try:
-            # strict: never resend this command with another encoding.
-            self._node.enable(f"reload in {_ZTP_RELOAD_DELAY} force", encoding="text", strict=True)
-        except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError) as exc:
-            self._restore_ztp_files(moved)
-            self._cancel_reload()
-            raise NetworkDeviceException(f"{self._host} did not confirm the reload: {exc}") from exc
+            for name in _ZTP_BLOCKING_FILES:
+                try:
+                    self._node.enable(f"rename flash:{name} flash:{name}{_ZTP_BACKUP_SUFFIX}")
+                except pyeapi.eapilib.CommandError as exc:
+                    if "No such file" in str(exc.command_error):
+                        continue  # not there, or moved aside by an earlier attempt
+                    self._restore_ztp_files()
+                    raise NetworkDeviceException(
+                        f"{self._host} could not move flash:{name} aside: {exc}"
+                    ) from exc
+                except pyeapi.eapilib.ConnectionError as exc:
+                    # The rename may have run before the connection dropped.
+                    self._restore_ztp_files()
+                    raise NetworkDeviceException(
+                        f"{self._host} could not move flash:{name} aside: {exc}"
+                    ) from exc
+
+            try:
+                # strict: never resend this command with another encoding.
+                self._node.enable(
+                    f"reload in {_ZTP_RELOAD_DELAY} force", encoding="text", strict=True
+                )
+            except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError) as exc:
+                self._restore_ztp_files()
+                self._cancel_reload()
+                raise NetworkDeviceException(
+                    f"{self._host} did not confirm the reload: {exc}"
+                ) from exc
         finally:
             transport.timeout = default_timeout
         logger.info("%s reloads into ZeroTouch in %s", self._host, _ZTP_RELOAD_DELAY)
@@ -711,14 +717,15 @@ class AristaConnection(NetworkConnection):
         except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
             logger.warning("Could not cancel a possibly scheduled reload on %s", self._host)
 
-    def _restore_ztp_files(self, names: list[str]) -> None:
+    def _restore_ztp_files(self) -> None:
         """Rename back the files execute_ztp moved aside, after a reset that did not happen.
 
         A file is renamed back only when the original is gone and the backup is
-        there. A rename whose response was lost may still have run, and renaming
-        a backup left by an earlier reset over an existing file would replace it.
+        there, which is the state a move leaves, whether this attempt or an
+        earlier one made it, and whether or not its response arrived. A backup
+        never replaces a file that is still in place.
         """
-        for name in names:
+        for name in _ZTP_BLOCKING_FILES:
             backup = f"{name}{_ZTP_BACKUP_SUFFIX}"
             try:
                 if self._flash_file_exists(name) or not self._flash_file_exists(backup):

@@ -689,6 +689,33 @@ def test_execute_ztp_moves_aside_what_blocks_zerotouch_then_schedules_the_reload
     assert transport.timeout == 300
 
 
+def test_execute_ztp_sends_every_request_with_the_short_timeout() -> None:
+    """Requests that hang must leave time for the rollback inside the activity deadline."""
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        {}, {}, _connection_error(TimeoutError("timed out")), *_RESTORE_ANSWERS, {}
+    )
+    transport = conn._node.connection.transport
+    transport.timeout = 300
+    seen: list[int] = []
+    answers = iter(conn._node.enable.side_effect)
+
+    def answer(*_args: object, **_kwargs: object) -> object:
+        seen.append(transport.timeout)
+        result = next(answers)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    conn._node.enable.side_effect = answer
+
+    with pytest.raises(NetworkDeviceException):
+        conn.execute_ztp()
+    assert len(seen) == 10
+    assert set(seen) == {20}
+    assert transport.timeout == 300
+
+
 def test_execute_ztp_skips_files_that_are_not_there() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
@@ -773,22 +800,61 @@ def test_execute_ztp_renames_back_what_it_moved_when_a_rename_fails() -> None:
 def test_execute_ztp_renames_back_a_file_whose_rename_ran_before_the_connection_dropped() -> None:
     conn = _arista_connection()
     conn._node = _eapi_node(
-        _connection_error(TimeoutError("timed out")), *_restore_answers("startup-config")
+        _connection_error(TimeoutError("timed out")),
+        *_restore_answers("startup-config"),
+        {},  # zerotouch-config is in place
     )
 
     with pytest.raises(NetworkDeviceException, match="could not move flash:startup-config"):
         conn.execute_ztp()
-    assert _commands(conn._node) == [_MOVE_ASIDE[0], *_restore("startup-config")]
+    assert _commands(conn._node) == [
+        _MOVE_ASIDE[0],
+        *_restore("startup-config"),
+        "show file information flash:zerotouch-config",
+    ]
+
+
+def test_execute_ztp_restores_a_file_an_earlier_attempt_moved() -> None:
+    """A retried activity finds startup-config already renamed; the rollback must still restore it."""
+    conn = _arista_connection()
+    conn._node = _eapi_node(
+        pyeapi.eapilib.CommandError(
+            1000, "could not run command", command_error=_MISSING_FILE.format("startup-config")
+        ),
+        pyeapi.eapilib.CommandError(
+            1000, "could not run command", command_error=_MISSING_FILE.format("zerotouch-config")
+        ),
+        _connection_error(TimeoutError("timed out")),
+        *_restore_answers("startup-config"),
+        _no_such_file("zerotouch-config"),
+        _no_such_file("zerotouch-config.nvcm-backup"),
+        {},
+    )
+
+    with pytest.raises(NetworkDeviceException, match="did not confirm the reload"):
+        conn.execute_ztp()
+    assert _commands(conn._node) == [
+        *_MOVE_ASIDE,
+        _RELOAD,
+        *_restore("startup-config"),
+        "show file information flash:zerotouch-config",
+        "show file information flash:zerotouch-config.nvcm-backup",
+        _CANCEL,
+    ]
 
 
 def test_execute_ztp_keeps_the_original_over_an_older_backup() -> None:
     """The rename did not run, so the backup left by an earlier reset must not replace the file."""
     conn = _arista_connection()
-    conn._node = _eapi_node(_connection_error(ConnectionRefusedError(111, "refused")), {})
+    conn._node = _eapi_node(_connection_error(ConnectionRefusedError(111, "refused")), {}, {})
 
     with pytest.raises(NetworkDeviceException, match="could not move flash:startup-config"):
         conn.execute_ztp()
-    assert _commands(conn._node) == [_MOVE_ASIDE[0], "show file information flash:startup-config"]
+    assert _commands(conn._node) == [
+        _MOVE_ASIDE[0],
+        "show file information flash:startup-config",
+        "show file information flash:zerotouch-config",
+    ]
 
 
 def test_execute_ztp_logs_where_a_file_is_when_renaming_it_back_fails() -> None:
