@@ -24,7 +24,7 @@ import sys
 import tarfile
 import time
 from collections.abc import Callable
-from typing import cast
+from typing import NoReturn, cast
 from uuid import uuid4
 
 import pyeapi
@@ -41,6 +41,7 @@ from nv_config_manager_workflows.clients.device.exceptions import (
     ConfigSyntaxException,
     DiffChangedException,
     NetworkDeviceException,
+    ZTPRollbackException,
 )
 from nv_config_manager_workflows.clients.device.models import (
     DeviceArpTable,
@@ -681,6 +682,7 @@ class AristaConnection(NetworkConnection):
         confirmation the reload may or may not be scheduled, so the files are
         renamed back and the reload is cancelled. The rollback checks both files,
         so it also restores a file that an earlier attempt of the activity moved.
+        If a file cannot be put back, the error is not retryable.
         """
         transport = self._node.connection.transport
         default_timeout = transport.timeout
@@ -692,38 +694,49 @@ class AristaConnection(NetworkConnection):
                 except pyeapi.eapilib.CommandError as exc:
                     if "No such file" in str(exc.command_error):
                         continue  # not there, or moved aside by an earlier attempt
-                    unrestored = self._restore_ztp_files()
-                    raise NetworkDeviceException(
-                        f"{self._host} could not move flash:{name} aside: {exc}"
-                        f"{_unrestored_note(unrestored)}"
-                    ) from exc
-                except pyeapi.eapilib.ConnectionError as exc:
-                    # The rename may have run before the connection dropped.
-                    unrestored = self._restore_ztp_files()
-                    raise NetworkDeviceException(
-                        f"{self._host} could not move flash:{name} aside: {exc}"
-                        f"{_unrestored_note(unrestored)}"
-                    ) from exc
+                    self._undo_ztp_reset(f"could not move flash:{name} aside", exc)
+                except (pyeapi.eapilib.ConnectionError, NetworkDeviceException) as exc:
+                    # The rename may have run before the connection dropped. A
+                    # NetworkDeviceException is eAPI rejecting every known password.
+                    self._undo_ztp_reset(f"could not move flash:{name} aside", exc)
 
             try:
                 # strict: never resend this command with another encoding.
                 self._node.enable(
                     f"reload in {_ZTP_RELOAD_DELAY} force", encoding="text", strict=True
                 )
-            except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError) as exc:
-                unrestored = self._restore_ztp_files()
-                self._cancel_reload()
-                raise NetworkDeviceException(
-                    f"{self._host} did not confirm the reload: {exc}{_unrestored_note(unrestored)}"
-                ) from exc
+            except (
+                pyeapi.eapilib.CommandError,
+                pyeapi.eapilib.ConnectionError,
+                NetworkDeviceException,
+            ) as exc:
+                self._undo_ztp_reset("did not confirm the reload", exc)
         finally:
             transport.timeout = default_timeout
         logger.info("%s reloads into ZeroTouch in %s", self._host, _ZTP_RELOAD_DELAY)
 
+    def _undo_ztp_reset(self, failure: str, exc: Exception) -> NoReturn:
+        """Rename the files back and cancel any scheduled reload, then raise.
+
+        The cancel also covers a reload that an earlier attempt scheduled without
+        getting the answer. A file that cannot be put back makes the error
+        ZTPRollbackException, which is not retryable.
+        """
+        unrestored = self._restore_ztp_files()
+        self._cancel_reload()
+        message = f"{self._host} {failure}: {exc}{_unrestored_note(unrestored)}"
+        if unrestored:
+            raise ZTPRollbackException(message) from exc
+        raise NetworkDeviceException(message) from exc
+
     def _cancel_reload(self) -> None:
         try:
             self._node.enable("reload cancel", encoding="text", strict=True)
-        except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
+        except (
+            pyeapi.eapilib.CommandError,
+            pyeapi.eapilib.ConnectionError,
+            NetworkDeviceException,
+        ):
             logger.warning("Could not cancel a possibly scheduled reload on %s", self._host)
 
     def _restore_ztp_files(self) -> list[str]:
@@ -742,7 +755,11 @@ class AristaConnection(NetworkConnection):
                 if self._flash_file_exists(name) or not self._flash_file_exists(backup):
                     continue
                 self._node.enable(f"rename flash:{backup} flash:{name}")
-            except (pyeapi.eapilib.CommandError, pyeapi.eapilib.ConnectionError):
+            except (
+                pyeapi.eapilib.CommandError,
+                pyeapi.eapilib.ConnectionError,
+                NetworkDeviceException,
+            ):
                 logger.error(
                     "Could not restore flash:%s on %s; it may still be at flash:%s",
                     name,
