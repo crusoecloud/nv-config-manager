@@ -750,7 +750,8 @@ class TestLoadConfigContexts:
             "http-port",
         } <= option_names
 
-    def test_bundled_arista_ztp_context_points_option_67_at_the_boot_script(self):
+    def test_bundled_arista_ztp_context_points_option_67_at_the_boot_script(self) -> None:
+        """The bundled Arista EOS context points DHCP option 67 at the rendered boot script."""
         data_path = Path(__file__).resolve().parents[1] / "nv_config_manager_jobs/data/config_contexts.yaml"
         with data_path.open() as f:
             config_contexts = yaml.safe_load(f)
